@@ -13,6 +13,11 @@ const envSchema = z.object({
   STELLAR_ADMIN_SECRET: z.string().min(1).optional(),
   STELLAR_RPC_URL: z.string().url().optional(),
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(120),
+  REDIS_URL: z.string().url().optional(),
+  EMAIL_PROVIDER: z.enum(['resend', 'smtp']).default('resend'),
+  EMAIL_PROVIDER_KEY: z.string().min(1).optional(),
+  EMAIL_FROM: z.string().min(1).optional(),
+  INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(15000),
 });
 
 export type ApiEnv = z.infer<typeof envSchema>;

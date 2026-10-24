@@ -43,9 +43,18 @@ export interface KycUser {
   role: string;
 }
 
+export interface NotificationRepository {
+  create(input: {
+    userId: string;
+    type: 'kyc_approved' | 'kyc_rejected';
+    payload: Record<string, unknown>;
+  }): Promise<void>;
+}
+
 export interface KycRoutesDeps {
   kycRepository: KycRepository;
   auditLogRepository: AuditLogRepository;
+  notificationRepository: NotificationRepository;
   getCurrentUser: (context: { request: Request }) => Promise<KycUser | null> | KycUser | null;
 }
 
@@ -61,7 +70,7 @@ const reviewBodySchema = t.Object({
 });
 
 export function kycRoutes(deps: KycRoutesDeps) {
-  const { kycRepository, auditLogRepository, getCurrentUser } = deps;
+  const { kycRepository, auditLogRepository, notificationRepository, getCurrentUser } = deps;
 
   return new Elysia({ prefix: '/kyc' })
     .post(
@@ -156,6 +165,17 @@ export function kycRoutes(deps: KycRoutesDeps) {
             decision: body.status,
             previousStatus: existing.status,
             notes,
+          },
+        });
+
+        await notificationRepository.create({
+          userId: updated.userId,
+          type: body.status === 'approved' ? 'kyc_approved' : 'kyc_rejected',
+          payload: {
+            submissionId: updated.id,
+            decision: body.status,
+            notes,
+            reviewedAt: reviewedAt.toISOString(),
           },
         });
 

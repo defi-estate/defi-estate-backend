@@ -1,3 +1,4 @@
+import { t } from 'elysia';
 import { z } from 'zod';
 import { PROPERTY_STATUSES, PROPERTY_TYPES } from '../types/property';
 
@@ -48,3 +49,36 @@ export function computeSharePriceUsdCents(valuationUsdCents: number, totalShares
   if (totalShares <= 0) throw new Error('totalShares must be positive');
   return Math.floor(valuationUsdCents / totalShares);
 }
+
+/** Elysia schema for a serialized property, used in route `response` maps. */
+export const propertyResponseSchema = t.Object({
+  id: t.String(),
+  name: t.String(),
+  description: t.String(),
+  type: t.UnionEnum(PROPERTY_TYPES),
+  status: t.UnionEnum(PROPERTY_STATUSES),
+  location: t.Object({
+    address: t.String(),
+    city: t.String(),
+    country: t.String(),
+  }),
+  valuationUsdCents: t.Number(),
+  totalShares: t.Number(),
+  sharePriceUsdCents: t.Number(),
+  expectedYieldBps: t.Number(),
+  tokenContractId: t.Union([t.String(), t.Null()]),
+  imageUrl: t.Union([t.String(), t.Null()]),
+  createdAt: t.String(),
+  updatedAt: t.String(),
+});
+export type PropertyResponse = typeof propertyResponseSchema.static;
+
+/** Elysia schema for a page of properties. */
+export const paginatedPropertiesResponseSchema = t.Object({
+  items: t.Array(propertyResponseSchema),
+  page: t.Number(),
+  pageSize: t.Number(),
+  total: t.Number(),
+  totalPages: t.Number(),
+});
+export type PaginatedPropertiesResponse = typeof paginatedPropertiesResponseSchema.static;

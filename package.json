@@ -27,6 +27,7 @@
     "@stellar/stellar-sdk": "^13.1.0",
     "drizzle-orm": "^0.45.2",
     "elysia": "^1.4.0",
+    "ioredis": "^5.4.1",
     "jose": "^6.0.10",
     "postgres": "^3.4.8",
     "zod": "^3.25.76"
