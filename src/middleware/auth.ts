@@ -13,6 +13,12 @@ export interface AuthUser {
   role: UserRole
 }
 
+export interface AuthContext {
+  user: AuthUser | null
+  requireUser: () => AuthUser
+  requireRole: (role: UserRole) => Promise<AuthUser>
+}
+
 declare module 'elysia' {
   interface Elysia {
     auth: {
@@ -61,9 +67,15 @@ export const authPlugin = new Elysia({ name: 'auth' })
         throw new HttpError(403, 'Insufficient permissions')
       }
 
-      return { publicKey: record.publicKey, role: record.role as UserRole }
+      const authenticated: AuthUser = {
+        publicKey: record.publicKey,
+        role: record.role as UserRole,
+      }
+      // Keep the request-scoped identity in sync so audit helpers can read the actor.
+      this.user = authenticated
+      return authenticated
     },
-  })
+  } as AuthContext)
   .onBeforeHandle(async ({ request, jwt, auth }) => {
     const token = extractBearer(request.headers.get('authorization'))
     if (!token) {
@@ -81,6 +93,10 @@ export const authPlugin = new Elysia({ name: 'auth' })
       publicKey: payload.sub,
       role: (typeof payload.role === 'string' ? payload.role : 'investor') as UserRole,
     }
+  })
+  .onAfterHandle(({ auth }) => {
+    // Reset the request-scoped identity so it never leaks between requests.
+    auth.user = null
   })
   .as('scoped')
 ```

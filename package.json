@@ -19,7 +19,8 @@
     "db:seed": "bun run src/db/seed.ts",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "db:up": "docker compose -f docker-compose.dev.yml up -d",
-    "db:down": "docker compose -f docker-compose.dev.yml down"
+    "db:down": "docker compose -f docker-compose.dev.yml down",
+    "audit:ci": "bun run scripts/audit-ci.ts"
   },
   "dependencies": {
     "@elysiajs/cors": "^1.4.0",
