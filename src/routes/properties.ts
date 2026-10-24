@@ -1,4 +1,5 @@
 import { Elysia, t } from 'elysia';
+import { fileTypeFromBuffer } from 'file-type';
 import {
   allowedTransitions,
   createPropertySchema,
@@ -16,9 +17,18 @@ import type { KycRepository } from '../repositories/KycRepository';
 import type { TransactionRepository } from '../repositories/TransactionRepository';
 import type { HolderBalanceRepository } from '../repositories/HolderBalanceRepository';
 import type { StellarService } from '../services/StellarService';
+import type { StorageService } from '../services/StorageService';
 import type { AuditService } from '../services/AuditService';
 
 const ok = <T>(data: T): ApiSuccess<T> => ({ success: true, data });
+
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+};
 
 const errorEnvelope = t.Object({
   success: t.Literal(false),
@@ -147,6 +157,7 @@ export interface PropertyRouteDeps {
   txRepo: TransactionRepository;
   holderBalanceRepo: HolderBalanceRepository;
   stellar: StellarService;
+  storage: StorageService;
   audit?: AuditService;
 }
 
@@ -156,6 +167,7 @@ export function propertyRoutes({
   txRepo,
   holderBalanceRepo,
   stellar,
+  storage,
   audit,
 }: PropertyRouteDeps) {
   return new Elysia({ prefix: '/properties', detail: { tags: ['Properties'] } })
@@ -186,7 +198,8 @@ export function propertyRoutes({
       async ({ params }) => {
         const property = await repo.get(params.id);
         if (!property) throw new HttpError(404, 'PROPERTY_NOT_FOUND', 'Property not found');
-        return ok(property);
+        const images = await repo.listImages(property.id);
+        return ok({ ...property, images });
       },
       { detail: { summary: 'Get a property' }, response: getResponse },
     )
@@ -338,6 +351,61 @@ export function propertyRoutes({
         beforeHandle: requireRole('operator'),
         detail: { summary: 'List token holders for a property (operator only)' },
         response: holdersResponse,
+      },
+    )
+    .post(
+      '/:id/images',
+      async ({ params, body, set }) => {
+        const property = await repo.get(params.id);
+        if (!property) throw new HttpError(404, 'PROPERTY_NOT_FOUND', 'Property not found');
+
+        const file = body.file;
+        if (!file) {
+          throw new HttpError(400, 'VALIDATION_ERROR', 'A file field is required');
+        }
+
+        const buffer = Buffer.from(await file.arrayBuffer());
+        if (buffer.byteLength === 0) {
+          throw new HttpError(400, 'VALIDATION_ERROR', 'Uploaded file is empty');
+        }
+        if (buffer.byteLength > MAX_IMAGE_BYTES) {
+          throw new HttpError(400, 'VALIDATION_ERROR', 'Uploaded file exceeds the 5 MB limit');
+        }
+
+        const detected = await fileTypeFromBuffer(buffer);
+        if (!detected || !ALLOWED_IMAGE_MIME_TYPES.has(detected.mime)) {
+          throw new HttpError(
+            400,
+            'VALIDATION_ERROR',
+            'Unsupported file type: only JPEG, PNG and WebP images are allowed',
+          );
+        }
+
+        const extension = IMAGE_EXTENSIONS[detected.mime];
+        const key = `properties/${property.id}/${crypto.randomUUID()}.${extension}`;
+        const { url } = await storage.upload({
+          key,
+          body: buffer,
+          contentType: detected.mime,
+        });
+
+        const image = await repo.addImage({
+          propertyId: property.id,
+          url,
+          key,
+          contentType: detected.mime,
+          size: buffer.byteLength,
+        });
+
+        set.status = 201;
+        return ok(image);
+      },
+      {
+        beforeHandle: requireRole('operator'),
+        body: t.Object({
+          file: t.File({ maxSize: MAX_IMAGE_BYTES }),
+        }),
+        detail: { summary: 'Upload a property image (operator only)' },
       },
     );
 }

@@ -1,4 +1,4 @@
-import { integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { integer, jsonb, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { PROPERTY_STATUSES, PROPERTY_TYPES } from '../shared';
 
 export const propertyStatus = pgEnum('property_status', PROPERTY_STATUSES);
@@ -57,6 +57,38 @@ export const auditLogs = pgTable('audit_logs', {
   metadata: jsonb('metadata').$type<Record<string, unknown>>(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const propertyImages = pgTable('property_images', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  propertyId: uuid('property_id')
+    .notNull()
+    .references(() => properties.id, { onDelete: 'cascade' }),
+  storageKey: text('storage_key').notNull(),
+  url: text('url').notNull(),
+  contentType: text('content_type').notNull(),
+  sizeBytes: integer('size_bytes').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type PropertyImageRow = typeof propertyImages.$inferSelect;
+export type NewPropertyImageRow = typeof propertyImages.$inferInsert;
+
+export const idempotencyKeys = pgTable(
+  'idempotency_keys',
+  {
+    key: text('key').notNull(),
+    route: text('route').notNull(),
+    requestHash: text('request_hash').notNull(),
+    statusCode: integer('status_code').notNull(),
+    response: jsonb('response').$type<unknown>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.key, table.route] })],
+);
+
+export type IdempotencyKeyRow = typeof idempotencyKeys.$inferSelect;
+export type NewIdempotencyKeyRow = typeof idempotencyKeys.$inferInsert;
 
 export const auditLog = pgTable('audit_log', {
   id: uuid('id').primaryKey().defaultRandom(),

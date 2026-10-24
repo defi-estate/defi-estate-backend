@@ -32,7 +32,7 @@ if (env.REDIS_URL) {
 
 const holderBalances = db ? new DrizzleHolderBalanceRepository(db) : undefined;
 
-createApp({
+const server = createApp({
   properties,
   holderBalances,
   corsOrigins: env.CORS_ALLOWED_ORIGINS.split(',').map((o) => o.trim()),
@@ -68,3 +68,56 @@ if (db && env.EMAIL_PROVIDER_KEY) {
 }
 
 console.info(`defi-estate API listening on http://localhost:${env.PORT} (docs at /docs)`);
+
+const SHUTDOWN_TIMEOUT_MS = 10_000;
+
+let shuttingDown = false;
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) {
+    console.info(`Received ${signal} but shutdown is already in progress, ignoring`);
+    return;
+  }
+  shuttingDown = true;
+
+  console.info(`Received ${signal}: starting graceful shutdown`);
+
+  try {
+    console.info('Stopping server: no longer accepting new requests');
+    await Promise.race([
+      server.stop(),
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          console.warn(
+            `In-flight requests did not finish within ${SHUTDOWN_TIMEOUT_MS}ms, forcing shutdown`,
+          );
+          resolve();
+        }, SHUTDOWN_TIMEOUT_MS);
+        timer.unref?.();
+      }),
+    ]);
+    console.info('Server stopped');
+
+    if (db) {
+      console.info('Closing database client');
+      await db.close();
+      console.info('Database client closed');
+    } else {
+      console.info('No database client to close');
+    }
+
+    console.info('Graceful shutdown complete');
+    process.exit(0);
+  } catch (error) {
+    console.error('Error during graceful shutdown', error);
+    process.exit(1);
+  }
+}
+
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM');
+});
+
+process.on('SIGINT', () => {
+  void shutdown('SIGINT');
+});

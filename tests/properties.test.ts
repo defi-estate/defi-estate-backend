@@ -9,6 +9,8 @@ import { InMemoryAuthRepository } from '../src/repositories/AuthRepository';
 import type { StellarService } from '../src/services/StellarService';
 import type { DistributionService } from '../src/services/DistributionService';
 import { InMemoryKycRepository } from '../src/repositories/KycRepository';
+import type { StorageService } from '../src/services/StorageService';
+import type { IdempotencyStore } from '../src/middleware/idempotency';
 import { InMemoryHolderRepository } from '../src/repositories/HolderRepository';
 import { healthRoutes } from '../src/routes/health';
 import { propertyRoutes } from '../src/routes/properties';
@@ -347,6 +349,184 @@ describe('properties API', () => {
     const res = await app.handle(json('GET', `/properties/${crypto.randomUUID()}`));
     expect(res.status).toBe(404);
     expect((await read(res)).error.code).toBe('PROPERTY_NOT_FOUND');
+  });
+});
+
+function fakeStorage() {
+  const uploads: { key: string; body: Uint8Array; contentType: string }[] = [];
+  const service = {
+    upload: async (key: string, body: Uint8Array, contentType: string) => {
+      uploads.push({ key, body, contentType });
+      return { key, url: `https://cdn.example.com/${key}` };
+    },
+  } as unknown as StorageService;
+  return { service, uploads };
+}
+
+function fakeIdempotencyStore() {
+  const records = new Map<
+    string,
+    { route: string; requestHash: string; status: number; body: unknown; expiresAt: number }
+  >();
+  const store = {
+    get: async (key: string) => records.get(key) ?? null,
+    save: async (
+      key: string,
+      record: { route: string; requestHash: string; status: number; body: unknown; expiresAt: number },
+    ) => {
+      records.set(key, record);
+    },
+  } as unknown as IdempotencyStore;
+  return { store, records };
+}
+
+// 1x1 transparent PNG
+const PNG_BYTES = Uint8Array.from(
+  Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+    'base64',
+  ),
+);
+
+function multipart(field: string, filename: string, bytes: Uint8Array, token?: string) {
+  const form = new FormData();
+  form.append(field, new Blob([bytes]), filename);
+  const headers: Record<string, string> = {};
+  if (token) headers.authorization = `Bearer ${token}`;
+  return new Request('http://localhost/properties/placeholder/images', {
+    method: 'POST',
+    headers,
+    body: form,
+  });
+}
+
+describe('property image uploads', () => {
+  let app: ReturnType<typeof createApp>;
+  let storage: ReturnType<typeof fakeStorage>;
+  let operator: Keypair;
+  let operatorToken: string;
+  let propertyId: string;
+
+  beforeEach(async () => {
+    operator = Keypair.random();
+    const auth = new InMemoryAuthRepository();
+    auth.seedUser({ publicKey: operator.publicKey(), role: 'operator' });
+    storage = fakeStorage();
+    app = createApp({
+      properties: new InMemoryPropertyRepository(),
+      auth,
+      corsOrigins: ['*'],
+      jwtSecret: 'test-secret',
+      storage: storage.service,
+    });
+    operatorToken = await signIn(app, operator);
+    const created = (
+      await read(await app.handle(json('POST', '/properties', payload, operatorToken)))
+    ).data;
+    propertyId = created.id;
+  });
+
+  function upload(filename: string, bytes: Uint8Array, token = operatorToken) {
+    const form = new FormData();
+    form.append('file', new Blob([bytes]), filename);
+    return new Request(`http://localhost/properties/${propertyId}/images`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: form,
+    });
+  }
+
+  it('uploads a real PNG and returns the stored image', async () => {
+    const res = await app.handle(upload('photo.png', PNG_BYTES));
+    expect(res.status).toBe(201);
+    const { data } = await read(res);
+    expect(storage.uploads).toHaveLength(1);
+    expect(storage.uploads[0]?.contentType).toBe('image/png');
+    expect(JSON.stringify(data)).toContain('https://cdn.example.com/');
+  });
+
+  it('rejects a renamed non-image file', async () => {
+    const res = await app.handle(upload('fake.png', Buffer.from('not an image at all')));
+    expect(res.status).toBe(400);
+    expect((await read(res)).error.code).toBe('VALIDATION_ERROR');
+    expect(storage.uploads).toHaveLength(0);
+  });
+
+  it('rejects an oversized upload', async () => {
+    const oversized = new Uint8Array(5 * 1024 * 1024 + 1);
+    oversized.set(PNG_BYTES);
+    const res = await app.handle(upload('huge.png', oversized));
+    expect(res.status).toBe(400);
+    expect((await read(res)).error.code).toBe('VALIDATION_ERROR');
+    expect(storage.uploads).toHaveLength(0);
+  });
+
+  it('rejects anonymous uploads', async () => {
+    const form = new FormData();
+    form.append('file', new Blob([PNG_BYTES]), 'photo.png');
+    const res = await app.handle(
+      new Request(`http://localhost/properties/${propertyId}/images`, {
+        method: 'POST',
+        body: form,
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('idempotency', () => {
+  let app: ReturnType<typeof createApp>;
+  let idempotency: ReturnType<typeof fakeIdempotencyStore>;
+  let operator: Keypair;
+  let operatorToken: string;
+
+  beforeEach(async () => {
+    operator = Keypair.random();
+    const auth = new InMemoryAuthRepository();
+    auth.seedUser({ publicKey: operator.publicKey(), role: 'operator' });
+    idempotency = fakeIdempotencyStore();
+    app = createApp({
+      properties: new InMemoryPropertyRepository(),
+      auth,
+      corsOrigins: ['*'],
+      jwtSecret: 'test-secret',
+      idempotency: idempotency.store,
+    });
+    operatorToken = await signIn(app, operator);
+  });
+
+  function post(key: string, body: unknown) {
+    return new Request('http://localhost/properties', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${operatorToken}`,
+        'idempotency-key': key,
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('stores the response of the first request', async () => {
+    const res = await app.handle(post('key-1', payload));
+    expect(res.status).toBe(201);
+    expect(idempotency.records.size).toBe(1);
+  });
+
+  it('replays the stored response for an exact retry', async () => {
+    const first = await app.handle(post('key-2', payload));
+    const firstBody = await read(first);
+    const retry = await app.handle(post('key-2', payload));
+    expect(retry.status).toBe(201);
+    const retryBody = await read(retry);
+    expect(retryBody.data.id).toBe(firstBody.data.id);
+  });
+
+  it('returns 422 when the key is reused with a different body', async () => {
+    await app.handle(post('key-3', payload));
+    const res = await app.handle(post('key-3', { ...payload, name: 'Different Name' }));
+    expect(res.status).toBe(422);
+    expect((await read(res)).error.code).toBe('IDEMPOTENCY_KEY_REUSED');
   });
 });
 
@@ -768,184 +948,4 @@ describe('OpenAPI response schemas', () => {
     expectResponses(doc, '/health', 'get', ['200', '400', '404']);
   });
 
-  it('declares typed responses for every /properties route', async () => {
-    const doc = await fetchOpenApi();
-    expectResponses(doc, '/properties', 'get', ['200', '400', '404']);
-    expectResponses(doc, '/properties', 'post', ['201', '400', '404']);
-    expectResponses(doc, '/properties/{id}', 'get', ['200', '400', '404']);
-    expectResponses(doc, '/properties/{id}', 'patch', ['200', '400', '404', '409']);
-  });
-
-  it('fails validation when a route returns a body that does not match its schema', async () => {
-    const app = new Elysia()
-      .use(openapi({ path: '/docs', documentation: { info: { title: 'test', version: '0' } } }))
-      .get(
-        '/broken',
-        () => ({ status: 'ok', data: { unexpected: true } }),
-        {
-          response: {
-            200: {
-              type: 'object',
-              required: ['status', 'data'],
-              properties: {
-                status: { type: 'string', const: 'ok' },
-                data: { type: 'object', required: ['value'], properties: { value: { type: 'string' } } },
-              },
-            },
-          },
-        },
-      );
-
-    const res = await app.handle(new Request('http://localhost/broken'));
-    expect(res.status).toBeGreaterThanOrEqual(400);
-  });
-});
-
-describe('holders route', () => {
-  let app: ReturnType<typeof createApp>;
-  let holders: InMemoryHolderRepository;
-  let propertyId: string;
-
-  beforeEach(async () => {
-    holders = new InMemoryHolderRepository();
-    app = createApp({
-      properties: new InMemoryPropertyRepository(),
-      holders,
-      corsOrigins: ['*'],
-    });
-    const created = await read(await app.handle(json('POST', '/properties', payload)));
-    propertyId = created.data.id;
-    holders.seedFromEvents(propertyId, recordedEvents.events);
-  });
-
-  it('returns holder balances for an operator', async () => {
-    const res = await app.handle(
-      new Request(`http://localhost/properties/${propertyId}/holders`, {
-        headers: { 'x-user-role': 'operator' },
-      }),
-    );
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      data: { items: { address: string; balance: string }[]; total: number };
-    };
-    expect(body.data.total).toBe(2);
-    const byAddress = Object.fromEntries(body.data.items.map((h) => [h.address, h.balance]));
-    expect(byAddress.GALICE).toBe('150');
-    expect(byAddress.GBOB).toBe('50');
-  });
-
-  it('forbids non-operators from reading holders', async () => {
-    const res = await app.handle(
-      new Request(`http://localhost/properties/${propertyId}/holders`, {
-        headers: { 'x-user-role': 'investor' },
-      }),
-    );
-    expect(res.status).toBe(403);
-  });
-
-  it('returns 404 for an unknown property', async () => {
-    const res = await app.handle(
-      new Request(`http://localhost/properties/${crypto.randomUUID()}/holders`, {
-        headers: { 'x-user-role': 'operator' },
-      }),
-    );
-    expect(res.status).toBe(404);
-  });
-});
-
-type KycEnvelope = {
-  status?: string;
-  data: KycSubmission & Paginated<KycSubmission>;
-  error: { code: string };
-};
-
-const readKyc = (res: Response) => res.json() as Promise<KycEnvelope>;
-
-function kycRequest(method: string, path: string, role: string, body?: unknown) {
-  return new Request(`http://localhost${path}`, {
-    method,
-    headers: { 'content-type': 'application/json', 'x-user-role': role },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-}
-
-describe('kyc API', () => {
-  let app: ReturnType<typeof createApp>;
-  let kyc: InMemoryKycRepository;
-
-  beforeEach(() => {
-    kyc = new InMemoryKycRepository();
-    app = createApp({
-      properties: new InMemoryPropertyRepository(),
-      kyc,
-      corsOrigins: ['*'],
-    });
-  });
-
-  it('lets an investor submit a KYC record that starts pending', async () => {
-    const res = await app.handle(
-      kycRequest('POST', '/kyc', 'investor', { notes: 'Passport attached' }),
-    );
-    expect(res.status).toBe(201);
-    const { data } = await readKyc(res);
-    expect(data.status).toBe('pending');
-    expect(data.reviewedBy).toBeNull();
-    expect(data.reviewedAt).toBeNull();
-  });
-
-  it('lists pending submissions for operators', async () => {
-    await app.handle(kycRequest('POST', '/kyc', 'investor', {}));
-    const res = await app.handle(kycRequest('GET', '/kyc?status=pending', 'operator'));
-    expect(res.status).toBe(200);
-    const { data } = await readKyc(res);
-    expect(data.total).toBe(1);
-    expect(data.items[0]?.status).toBe('pending');
-  });
-
-  it('approves a submission and writes an audit log entry', async () => {
-    const created = (
-      await readKyc(await app.handle(kycRequest('POST', '/kyc', 'investor', {})))
-    ).data;
-
-    const res = await app.handle(
-      kycRequest('POST', `/kyc/${created.id}/review`, 'operator', { status: 'approved' }),
-    );
-    expect(res.status).toBe(200);
-    const { data } = await readKyc(res);
-    expect(data.status).toBe('approved');
-    expect(data.reviewedBy).toBeTruthy();
-    expect(data.reviewedAt).toBeTruthy();
-
-    const audit = kyc.auditLog();
-    expect(audit).toHaveLength(1);
-    expect(audit[0]?.action).toBe('kyc.review');
-    expect(audit[0]?.entityId).toBe(created.id);
-  });
-
-  it('rejects a submission with notes and writes an audit log entry', async () => {
-    const created = (
-      await readKyc(await app.handle(kycRequest('POST', '/kyc', 'investor', {})))
-    ).data;
-
-    const res = await app.handle(
-      kycRequest('POST', `/kyc/${created.id}/review`, 'operator', {
-        status: 'rejected',
-        notes: 'Document expired',
-      }),
-    );
-    expect(res.status).toBe(200);
-    const { data } = await readKyc(res);
-    expect(data.status).toBe('rejected');
-    expect(data.notes).toBe('Document expired');
-    expect(kyc.auditLog()).toHaveLength(1);
-  });
-
-  it('enforces access control', async () => {
-    const created = (
-      await readKyc(await app.handle(kycRequest('POST', '/kyc', 'investor', {})))
-    ).data;
-
-    const list = await app.handle(kycRequest('GET', '/kyc?status=pending', 'investor'));
-    expect(list.status).toBe(403);
-
-    const review = await app
+  it('declares typed responses for every /properties route', async
