@@ -7,10 +7,13 @@ import { healthRoutes } from './routes/health';
 import { propertyRoutes } from './routes/properties';
 import { distributionRoutes } from './routes/distributions';
 import { kycRoutes } from './routes/kyc';
+import { auditRoutes } from './routes/audit';
+import { authPlugin } from './middleware/auth';
 import type { PropertyRepository } from './repositories/PropertyRepository';
 import type { KycRepository } from './repositories/KycRepository';
 import type { StellarService } from './services/StellarService';
 import type { DistributionService } from './services/DistributionService';
+import type { AuditService } from './services/AuditService';
 
 export interface AppDeps {
   properties: PropertyRepository;
@@ -18,6 +21,7 @@ export interface AppDeps {
   corsOrigins: string[];
   stellar?: StellarService;
   distributions?: DistributionService;
+  audit?: AuditService;
   rateLimitPerMinute?: number;
 }
 
@@ -28,6 +32,7 @@ export function createApp({
   corsOrigins,
   stellar,
   distributions,
+  audit,
   rateLimitPerMinute,
 }: AppDeps) {
   let app = new Elysia()
@@ -35,12 +40,17 @@ export function createApp({
     .use(requestLogger)
     .use(rateLimit({ limitPerMinute: rateLimitPerMinute }))
     .use(errorHandler)
+    .use(authPlugin)
     .use(healthRoutes)
     .use(propertyRoutes(properties, stellar))
     .use(kycRoutes({ kyc }));
 
   if (distributions) {
     app = app.use(distributionRoutes(distributions));
+  }
+
+  if (audit) {
+    app = app.use(auditRoutes({ audit }));
   }
 
   return app;

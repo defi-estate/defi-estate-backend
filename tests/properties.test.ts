@@ -13,6 +13,7 @@ import { InMemoryHolderRepository } from '../src/repositories/HolderRepository';
 import { healthRoutes } from '../src/routes/health';
 import { propertyRoutes } from '../src/routes/properties';
 import recordedEvents from './fixtures/soroban-events.json';
+import { InMemoryAuditService } from '../src/services/AuditService';
 
 const payload = {
   name: 'Lekki Garden Apartments',
@@ -346,6 +347,153 @@ describe('properties API', () => {
     const res = await app.handle(json('GET', `/properties/${crypto.randomUUID()}`));
     expect(res.status).toBe(404);
     expect((await read(res)).error.code).toBe('PROPERTY_NOT_FOUND');
+  });
+});
+
+describe('audit API', () => {
+  let app: ReturnType<typeof createApp>;
+  let operator: Keypair;
+  let investor: Keypair;
+  let operatorToken: string;
+  let investorToken: string;
+
+  type AuditEntry = {
+    id: string;
+    actor: string;
+    action: string;
+    entityType: string;
+    entityId: string;
+    before: unknown;
+    after: unknown;
+    createdAt: string;
+  };
+
+  type AuditEnvelope = {
+    status?: string;
+    data: AuditEntry & Paginated<AuditEntry>;
+    error: { code: string };
+  };
+
+  const readAudit = (res: Response) => res.json() as Promise<AuditEnvelope>;
+
+  beforeEach(async () => {
+    operator = Keypair.random();
+    investor = Keypair.random();
+    const auth = new InMemoryAuthRepository();
+    auth.seedUser({ publicKey: operator.publicKey(), role: 'operator' });
+    auth.seedUser({ publicKey: investor.publicKey(), role: 'investor' });
+    app = createApp({
+      properties: new InMemoryPropertyRepository(),
+      auth,
+      audit: new InMemoryAuditService(),
+      corsOrigins: ['*'],
+      jwtSecret: 'test-secret',
+    });
+    operatorToken = await signIn(app, operator);
+    investorToken = await signIn(app, investor);
+  });
+
+  it('records an entry for each property update', async () => {
+    const created = (
+      await read(await app.handle(json('POST', '/properties', payload, operatorToken)))
+    ).data;
+
+    const patch = await app.handle(
+      json('PATCH', `/properties/${created.id}`, { totalShares: 20_000 }, operatorToken),
+    );
+    expect(patch.status).toBe(200);
+
+    const res = await app.handle(
+      json(
+        'GET',
+        `/audit?entityType=property&entityId=${created.id}`,
+        undefined,
+        operatorToken,
+      ),
+    );
+    expect(res.status).toBe(200);
+    const { data } = await readAudit(res);
+    expect(data.total).toBe(1);
+    expect(data.items).toHaveLength(1);
+    const entry = data.items[0] as AuditEntry;
+    expect(entry.action).toBe('property.update');
+    expect(entry.entityType).toBe('property');
+    expect(entry.entityId).toBe(created.id);
+    expect(entry.actor).toBe(operator.publicKey());
+    expect((entry.before as Property).totalShares).toBe(payload.totalShares);
+    expect((entry.after as Property).totalShares).toBe(20_000);
+  });
+
+  it('enforces access control on the audit log', async () => {
+    const anonymous = await app.handle(json('GET', '/audit'));
+    expect(anonymous.status).toBe(401);
+
+    const forbidden = await app.handle(json('GET', '/audit', undefined, investorToken));
+    expect(forbidden.status).toBe(403);
+  });
+
+  it('does not allow audit rows to be mutated through the API', async () => {
+    const created = (
+      await read(await app.handle(json('POST', '/properties', payload, operatorToken)))
+    ).data;
+    await app.handle(
+      json('PATCH', `/properties/${created.id}`, { totalShares: 20_000 }, operatorToken),
+    );
+    const entry = (
+      await readAudit(
+        await app.handle(
+          json(
+            'GET',
+            `/audit?entityType=property&entityId=${created.id}`,
+            undefined,
+            operatorToken,
+          ),
+        ),
+      )
+    ).data.items[0] as AuditEntry;
+
+    for (const method of ['PATCH', 'PUT', 'DELETE']) {
+      const collection = await app.handle(json(method, '/audit', {}, operatorToken));
+      expect([404, 405]).toContain(collection.status);
+
+      const single = await app.handle(json(method, `/audit/${entry.id}`, {}, operatorToken));
+      expect([404, 405]).toContain(single.status);
+    }
+
+    const after = await readAudit(
+      await app.handle(
+        json(
+          'GET',
+          `/audit?entityType=property&entityId=${created.id}`,
+          undefined,
+          operatorToken,
+        ),
+      ),
+    );
+    expect(after.data.total).toBe(1);
+    expect((after.data.items[0] as AuditEntry).action).toBe('property.update');
+  });
+
+  it('returns pagination fields', async () => {
+    const created = (
+      await read(await app.handle(json('POST', '/properties', payload, operatorToken)))
+    ).data;
+    await app.handle(
+      json('PATCH', `/properties/${created.id}`, { totalShares: 20_000 }, operatorToken),
+    );
+    await app.handle(
+      json('PATCH', `/properties/${created.id}`, { expectedYieldBps: 800 }, operatorToken),
+    );
+
+    const res = await app.handle(
+      json('GET', '/audit?page=1&pageSize=1', undefined, operatorToken),
+    );
+    expect(res.status).toBe(200);
+    const { data } = await readAudit(res);
+    expect(data.page).toBe(1);
+    expect(data.pageSize).toBe(1);
+    expect(data.total).toBe(2);
+    expect(data.items).toHaveLength(1);
   });
 });
 
@@ -800,22 +948,4 @@ describe('kyc API', () => {
     const list = await app.handle(kycRequest('GET', '/kyc?status=pending', 'investor'));
     expect(list.status).toBe(403);
 
-    const review = await app.handle(
-      kycRequest('POST', `/kyc/${created.id}/review`, 'investor', { status: 'approved' }),
-    );
-    expect(review.status).toBe(403);
-
-    const submit = await app.handle(kycRequest('POST', '/kyc', 'operator', {}));
-    expect(submit.status).toBe(403);
-  });
-
-  it('returns 404 when reviewing an unknown submission', async () => {
-    const res = await app.handle(
-      kycRequest('POST', `/kyc/${crypto.randomUUID()}/review`, 'operator', {
-        status: 'approved',
-      }),
-    );
-    expect(res.status).toBe(404);
-    expect((await readKyc(res)).error.code).toBe('KYC_NOT_FOUND');
-  });
-});
+    const review = await app

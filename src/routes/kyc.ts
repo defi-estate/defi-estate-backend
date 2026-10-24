@@ -1,6 +1,7 @@
 import { Elysia, t } from 'elysia';
 import { eq, and } from 'drizzle-orm';
 import { kycSubmissions, auditLogs } from '../db/schema';
+import type { AuditService } from '../services/AuditService';
 
 export type KycStatus = 'pending' | 'approved' | 'rejected';
 
@@ -28,16 +29,6 @@ export interface KycRepository {
   }): Promise<KycSubmission | null>;
 }
 
-export interface AuditLogRepository {
-  create(input: {
-    action: string;
-    entityType: string;
-    entityId: string;
-    actorId: string;
-    metadata: Record<string, unknown>;
-  }): Promise<void>;
-}
-
 export interface KycUser {
   id: string;
   role: string;
@@ -53,7 +44,7 @@ export interface NotificationRepository {
 
 export interface KycRoutesDeps {
   kycRepository: KycRepository;
-  auditLogRepository: AuditLogRepository;
+  auditService: AuditService;
   notificationRepository: NotificationRepository;
   getCurrentUser: (context: { request: Request }) => Promise<KycUser | null> | KycUser | null;
 }
@@ -70,7 +61,7 @@ const reviewBodySchema = t.Object({
 });
 
 export function kycRoutes(deps: KycRoutesDeps) {
-  const { kycRepository, auditLogRepository, notificationRepository, getCurrentUser } = deps;
+  const { kycRepository, auditService, notificationRepository, getCurrentUser } = deps;
 
   return new Elysia({ prefix: '/kyc' })
     .post(
@@ -156,16 +147,13 @@ export function kycRoutes(deps: KycRoutesDeps) {
           return { error: 'Submission not found' };
         }
 
-        await auditLogRepository.create({
+        await auditService.log({
+          actor: user.id,
           action: 'kyc.review',
           entityType: 'kyc_submission',
           entityId: updated.id,
-          actorId: user.id,
-          metadata: {
-            decision: body.status,
-            previousStatus: existing.status,
-            notes,
-          },
+          before: existing,
+          after: updated,
         });
 
         await notificationRepository.create({

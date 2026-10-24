@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { DistributionService } from '../services/DistributionService';
+import { AuditService } from '../services/AuditService';
 import { requireOperator } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { NotFoundError } from '../errors';
@@ -44,6 +45,14 @@ router.post(
         grossAmount,
         snapshotLedger,
         period,
+      });
+
+      await AuditService.log({
+        actor: req.operator!.address,
+        action: 'distribution.create',
+        entityType: 'distribution',
+        entityId: distribution.id,
+        after: distribution,
       });
 
       res.status(201).json({
