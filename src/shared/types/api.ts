@@ -20,3 +20,21 @@ export interface Paginated<T> {
   pageSize: number;
   total: number;
 }
+
+export interface AuditLog {
+  id: string;
+  actor: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  before: unknown;
+  after: unknown;
+  createdAt: string;
+}
+
+export interface AuditQuery {
+  entityType?: string;
+  entityId?: string;
+  page?: number;
+  pageSize?: number;
+}
