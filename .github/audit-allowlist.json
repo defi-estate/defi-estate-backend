@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Allowlist for accepted dependency security advisories. Each entry requires: id (GHSA or CVE identifier), package (affected package name), reason (human-readable justification for acceptance), and reviewDate (ISO 8601 date by which the acceptance must be re-reviewed).",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["id", "package", "reason", "reviewDate"],
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Advisory identifier, e.g. GHSA-xxxx-xxxx-xxxx or CVE-YYYY-NNNNN"
+      },
+      "package": {
+        "type": "string",
+        "description": "Name of the affected package"
+      },
+      "reason": {
+        "type": "string",
+        "description": "Human-readable justification for accepting the advisory"
+      },
+      "reviewDate": {
+        "type": "string",
+        "format": "date",
+        "description": "ISO 8601 date by which this acceptance must be re-reviewed"
+      }
+    },
+    "additionalProperties": false
+  },
+  "entries": []
+}
