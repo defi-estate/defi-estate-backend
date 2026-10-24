@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { InMemoryPropertyRepository } from '../../src/repositories/InMemoryPropertyRepository';
 import { DrizzlePropertyRepository } from '../../src/repositories/DrizzlePropertyRepository';
+import { CachedPropertyRepository } from '../../src/repositories/CachedPropertyRepository';
 import type { PropertyRepository } from '../../src/repositories/PropertyRepository';
 import type { NewProperty } from '../../src/db/schema';
 
@@ -107,6 +108,110 @@ function runRepositoryCases(
 }
 
 runRepositoryCases('InMemoryPropertyRepository', () => new InMemoryPropertyRepository());
+
+function createMockCache() {
+  const store = new Map<string, string>();
+
+  return {
+    store,
+    get: vi.fn(async (key: string) => store.get(key) ?? null),
+    set: vi.fn(async (key: string, value: string) => {
+      store.set(key, value);
+    }),
+    deleteByPrefix: vi.fn(async (prefix: string) => {
+      for (const key of [...store.keys()]) {
+        if (key.startsWith(prefix)) {
+          store.delete(key);
+        }
+      }
+    }),
+  };
+}
+
+describe('CachedPropertyRepository', () => {
+  it('serves the second list read from cache', async () => {
+    const inner = new InMemoryPropertyRepository();
+    const cache = createMockCache();
+    const repository = new CachedPropertyRepository(inner, cache as never);
+
+    await repository.create(makeProperty({ name: 'Cached List' }));
+
+    const findAllSpy = vi.spyOn(inner, 'findAll');
+    const first = await repository.findAll();
+    const second = await repository.findAll();
+
+    expect(findAllSpy).toHaveBeenCalledTimes(1);
+    expect(second).toEqual(first);
+    expect(cache.set).toHaveBeenCalled();
+  });
+
+  it('serves the second get-by-id read from cache', async () => {
+    const inner = new InMemoryPropertyRepository();
+    const cache = createMockCache();
+    const repository = new CachedPropertyRepository(inner, cache as never);
+
+    const created = await repository.create(makeProperty({ name: 'Cached Get' }));
+
+    const findByIdSpy = vi.spyOn(inner, 'findById');
+    const first = await repository.findById(created.id);
+    const second = await repository.findById(created.id);
+
+    expect(findByIdSpy).toHaveBeenCalledTimes(1);
+    expect(second).toEqual(first);
+    expect(second?.name).toBe('Cached Get');
+  });
+
+  it('invalidates the cache on create', async () => {
+    const inner = new InMemoryPropertyRepository();
+    const cache = createMockCache();
+    const repository = new CachedPropertyRepository(inner, cache as never);
+
+    await repository.findAll();
+    expect(cache.store.size).toBeGreaterThan(0);
+
+    await repository.create(makeProperty({ name: 'Invalidate Create' }));
+
+    expect(cache.deleteByPrefix).toHaveBeenCalled();
+    expect(cache.store.size).toBe(0);
+
+    const findAllSpy = vi.spyOn(inner, 'findAll');
+    const after = await repository.findAll();
+    expect(findAllSpy).toHaveBeenCalledTimes(1);
+    expect(after.map((property) => property.name)).toContain('Invalidate Create');
+  });
+
+  it('invalidates the cache on update', async () => {
+    const inner = new InMemoryPropertyRepository();
+    const cache = createMockCache();
+    const repository = new CachedPropertyRepository(inner, cache as never);
+
+    const created = await repository.create(makeProperty({ name: 'Before Update' }));
+    await repository.findById(created.id);
+    await repository.findAll();
+    expect(cache.store.size).toBeGreaterThan(0);
+
+    await repository.update(created.id, { name: 'After Update' });
+
+    expect(cache.deleteByPrefix).toHaveBeenCalled();
+    expect(cache.store.size).toBe(0);
+
+    const found = await repository.findById(created.id);
+    expect(found?.name).toBe('After Update');
+  });
+
+  it('falls back to the inner repository when no cache is provided', async () => {
+    const inner = new InMemoryPropertyRepository();
+    const repository = new CachedPropertyRepository(inner, null);
+
+    const created = await repository.create(makeProperty({ name: 'No Cache' }));
+
+    const found = await repository.findById(created.id);
+    expect(found?.name).toBe('No Cache');
+
+    const all = await repository.findAll();
+    expect(all.map((property) => property.name)).toContain('No Cache');
+  });
+});
 
 describe.skipIf(!hasDatabase)('DrizzlePropertyRepository (Postgres)', () => {
   let repository: DrizzlePropertyRepository;

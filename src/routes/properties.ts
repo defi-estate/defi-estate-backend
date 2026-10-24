@@ -15,6 +15,7 @@ import { authPlugin, requireRole } from '../middleware/auth';
 import type { PropertyRepository } from '../repositories/PropertyRepository';
 import type { KycRepository } from '../repositories/KycRepository';
 import type { TransactionRepository } from '../repositories/TransactionRepository';
+import type { HolderBalanceRepository } from '../repositories/HolderBalanceRepository';
 import type { StellarService } from '../services/StellarService';
 import type { StorageService } from '../services/StorageService';
 import type { AuditService } from '../services/AuditService';
@@ -27,6 +28,98 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
+};
+
+const errorEnvelope = t.Object({
+  success: t.Literal(false),
+  error: t.Object({
+    code: t.String(),
+    message: t.String(),
+    details: t.Optional(t.Unknown()),
+  }),
+});
+
+const propertySchema = t.Object({
+  id: t.String(),
+  name: t.String(),
+  description: t.Optional(t.Union([t.String(), t.Null()])),
+  city: t.String(),
+  country: t.String(),
+  type: t.String(),
+  status: t.String(),
+  tokenContractId: t.Optional(t.Union([t.String(), t.Null()])),
+  yieldBps: t.Optional(t.Union([t.Number(), t.Null()])),
+  createdAt: t.Optional(t.Union([t.String(), t.Date()])),
+  updatedAt: t.Optional(t.Union([t.String(), t.Date()])),
+});
+
+const transactionSchema = t.Object({
+  id: t.String(),
+  propertyId: t.String(),
+  investorId: t.String(),
+  type: t.String(),
+  txHash: t.String(),
+  status: t.String(),
+  result: t.Optional(t.Unknown()),
+  createdAt: t.Optional(t.Union([t.String(), t.Date()])),
+});
+
+const holderBalanceSchema = t.Object({
+  propertyId: t.String(),
+  investorId: t.String(),
+  walletAddress: t.String(),
+  balance: t.String(),
+  updatedAt: t.Optional(t.Union([t.String(), t.Date()])),
+});
+
+const successEnvelope = <T extends ReturnType<typeof t.Object>>(data: T) =>
+  t.Object({ success: t.Literal(true), data });
+
+const paginatedEnvelope = <T extends ReturnType<typeof t.Object>>(item: T) =>
+  successEnvelope(
+    t.Object({
+      items: t.Array(item),
+      page: t.Number(),
+      limit: t.Number(),
+      total: t.Number(),
+      totalPages: t.Number(),
+    }),
+  );
+
+const listResponse = {
+  200: paginatedEnvelope(propertySchema),
+  400: errorEnvelope,
+  404: errorEnvelope,
+};
+
+const getResponse = {
+  200: successEnvelope(propertySchema),
+  400: errorEnvelope,
+  404: errorEnvelope,
+};
+
+const createResponse = {
+  201: successEnvelope(propertySchema),
+  400: errorEnvelope,
+};
+
+const updateResponse = {
+  200: successEnvelope(propertySchema),
+  400: errorEnvelope,
+  404: errorEnvelope,
+};
+
+const transactionResponse = {
+  201: successEnvelope(transactionSchema),
+  400: errorEnvelope,
+  404: errorEnvelope,
+  409: errorEnvelope,
+};
+
+const holdersResponse = {
+  200: successEnvelope(t.Array(holderBalanceSchema)),
+  400: errorEnvelope,
+  404: errorEnvelope,
 };
 
 function assertValidTransition(current: PropertyStatus, next: PropertyStatus, tokenContractId?: string | null) {
@@ -62,12 +155,21 @@ export interface PropertyRouteDeps {
   repo: PropertyRepository;
   kycRepo: KycRepository;
   txRepo: TransactionRepository;
+  holderBalanceRepo: HolderBalanceRepository;
   stellar: StellarService;
   storage: StorageService;
   audit?: AuditService;
 }
 
-export function propertyRoutes({ repo, kycRepo, txRepo, stellar, storage, audit }: PropertyRouteDeps) {
+export function propertyRoutes({
+  repo,
+  kycRepo,
+  txRepo,
+  holderBalanceRepo,
+  stellar,
+  storage,
+  audit,
+}: PropertyRouteDeps) {
   return new Elysia({ prefix: '/properties', detail: { tags: ['Properties'] } })
     .use(authPlugin)
     .get(
@@ -88,6 +190,7 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar, storage, audit 
             { name: 'sort', in: 'query', schema: { type: 'string', enum: ['yield_desc', 'newest'] } },
           ],
         },
+        response: listResponse,
       },
     )
     .get(
@@ -98,7 +201,7 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar, storage, audit 
         const images = await repo.listImages(property.id);
         return ok({ ...property, images });
       },
-      { detail: { summary: 'Get a property' } },
+      { detail: { summary: 'Get a property' }, response: getResponse },
     )
     .post(
       '/',
@@ -110,6 +213,7 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar, storage, audit 
       {
         beforeHandle: requireRole('operator'),
         detail: { summary: 'Create a property (draft)' },
+        response: createResponse,
       },
     )
     .patch(
@@ -140,6 +244,7 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar, storage, audit 
       {
         beforeHandle: requireRole('operator'),
         detail: { summary: 'Update a property' },
+        response: updateResponse,
       },
     )
     .post(
@@ -185,6 +290,7 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar, storage, audit 
         beforeHandle: requireRole('operator'),
         body: whitelistBodySchema,
         detail: { summary: 'Whitelist an investor on the property token (operator only)' },
+        response: transactionResponse,
       },
     )
     .post(
@@ -231,6 +337,20 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar, storage, audit 
         beforeHandle: requireRole('operator'),
         body: mintBodySchema,
         detail: { summary: 'Mint property tokens to an investor (operator only)' },
+        response: transactionResponse,
+      },
+    )
+    .get(
+      '/:id/holders',
+      async ({ params }) => {
+        const property = await repo.get(params.id);
+        if (!property) throw new HttpError(404, 'PROPERTY_NOT_FOUND', 'Property not found');
+        return ok(await holderBalanceRepo.listByProperty(params.id));
+      },
+      {
+        beforeHandle: requireRole('operator'),
+        detail: { summary: 'List token holders for a property (operator only)' },
+        response: holdersResponse,
       },
     )
     .post(

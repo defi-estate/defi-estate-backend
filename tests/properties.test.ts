@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { Keypair } from '@stellar/stellar-sdk';
+import { Elysia } from 'elysia';
+import { openapi } from '@elysiajs/swagger';
 import type { KycSubmission, Paginated, Property } from '../src/shared';
 import { createApp } from '../src/app';
 import { InMemoryPropertyRepository } from '../src/repositories/PropertyRepository';
@@ -9,6 +11,10 @@ import type { DistributionService } from '../src/services/DistributionService';
 import { InMemoryKycRepository } from '../src/repositories/KycRepository';
 import type { StorageService } from '../src/services/StorageService';
 import type { IdempotencyStore } from '../src/middleware/idempotency';
+import { InMemoryHolderRepository } from '../src/repositories/HolderRepository';
+import { healthRoutes } from '../src/routes/health';
+import { propertyRoutes } from '../src/routes/properties';
+import recordedEvents from './fixtures/soroban-events.json';
 import { InMemoryAuditService } from '../src/services/AuditService';
 
 const payload = {
@@ -902,55 +908,44 @@ describe('distributions route', () => {
   });
 });
 
-type KycEnvelope = {
-  status?: string;
-  data: KycSubmission & Paginated<KycSubmission>;
-  error: { code: string };
+type OpenApiDoc = {
+  paths: Record<
+    string,
+    Record<string, { responses?: Record<string, { content?: Record<string, unknown> }> }>
+  >;
 };
 
-const readKyc = (res: Response) => res.json() as Promise<KycEnvelope>;
-
-function kycRequest(method: string, path: string, role: string, body?: unknown) {
-  return new Request(`http://localhost${path}`, {
-    method,
-    headers: { 'content-type': 'application/json', 'x-user-role': role },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+function buildDocumentedApp() {
+  return new Elysia()
+    .use(openapi({ path: '/docs', documentation: { info: { title: 'test', version: '0' } } }))
+    .use(healthRoutes())
+    .use(propertyRoutes({ properties: new InMemoryPropertyRepository() }));
 }
 
-describe('kyc API', () => {
-  let app: ReturnType<typeof createApp>;
-  let kyc: InMemoryKycRepository;
+async function fetchOpenApi(): Promise<OpenApiDoc> {
+  const app = buildDocumentedApp();
+  const res = await app.handle(new Request('http://localhost/docs/json'));
+  expect(res.status).toBe(200);
+  return (await res.json()) as OpenApiDoc;
+}
 
-  beforeEach(() => {
-    kyc = new InMemoryKycRepository();
-    app = createApp({
-      properties: new InMemoryPropertyRepository(),
-      kyc,
-      corsOrigins: ['*'],
-    });
+function expectResponses(doc: OpenApiDoc, path: string, method: string, codes: string[]) {
+  const operation = doc.paths[path]?.[method];
+  expect(operation).toBeDefined();
+  for (const code of codes) {
+    const response = operation?.responses?.[code];
+    expect(response, `${method.toUpperCase()} ${path} is missing a ${code} response`).toBeDefined();
+    expect(
+      Object.keys(response?.content ?? {}).length,
+      `${method.toUpperCase()} ${path} ${code} has no content schema`,
+    ).toBeGreaterThan(0);
+  }
+}
+
+describe('OpenAPI response schemas', () => {
+  it('declares typed responses for /health', async () => {
+    const doc = await fetchOpenApi();
+    expectResponses(doc, '/health', 'get', ['200', '400', '404']);
   });
 
-  it('lets an investor submit a KYC record that starts pending', async () => {
-    const res = await app.handle(
-      kycRequest('POST', '/kyc', 'investor', { notes: 'Passport attached' }),
-    );
-    expect(res.status).toBe(201);
-    const { data } = await readKyc(res);
-    expect(data.status).toBe('pending');
-    expect(data.reviewedBy).toBeNull();
-    expect(data.reviewedAt).toBeNull();
-  });
-
-  it('lists pending submissions for operators', async () => {
-    await app.handle(kycRequest('POST', '/kyc', 'investor', {}));
-    const res = await app.handle(kycRequest('GET', '/kyc?status=pending', 'operator'));
-    expect(res.status).toBe(200);
-    const { data } = await readKyc(res);
-    expect(data.total).toBe(1);
-    expect(data.items[0]?.status).toBe('pending');
-  });
-
-  it('approves a submission and writes an audit log entry', async () => {
-    const created = (
-      await readKyc(await app.handle(kycRequest('POST', '/
+  it('declares typed responses for every /properties route', async

@@ -20,6 +20,11 @@ const envSchema = z.object({
   S3_REGION: z.string().min(1).optional(),
   S3_ACCESS_KEY_ID: z.string().min(1).optional(),
   S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+  REDIS_URL: z.string().url().optional(),
+  EMAIL_PROVIDER: z.enum(['resend', 'smtp']).default('resend'),
+  EMAIL_PROVIDER_KEY: z.string().min(1).optional(),
+  EMAIL_FROM: z.string().min(1).optional(),
+  INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(15000),
 });
 
 export type ApiEnv = z.infer<typeof envSchema>;
@@ -41,32 +46,3 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     STELLAR_RPC_URL: data.STELLAR_RPC_URL ?? DEFAULT_RPC_URLS[data.STELLAR_NETWORK],
   };
 }
-```
-
-.env.example:
-
-```
-# API
-PORT=3001
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/stellar_estate
-CORS_ALLOWED_ORIGINS=http://localhost:3000
-STELLAR_NETWORK=testnet
-
-# Auth
-# Secret used to sign JWT session tokens. Must be at least 32 characters.
-JWT_SECRET=change-me-to-a-long-random-secret-value
-
-# Operator seed
-# Stellar public key of the first operator account created by the seed script.
-OPERATOR_PUBLIC_KEY=GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
-
-# S3-compatible storage (required for property image uploads)
-# Bucket where uploaded property images are stored.
-S3_BUCKET=stellar-estate-images
-# Endpoint of the S3-compatible service (e.g. MinIO, R2, AWS S3).
-S3_ENDPOINT=http://localhost:9000
-# Region for the storage service (use "auto" for Cloudflare R2).
-S3_REGION=us-east-1
-# Credentials used to sign upload requests.
-S3_ACCESS_KEY_ID=change-me
-S3_SECRET_ACCESS_KEY=change-me
