@@ -1,4 +1,4 @@
-import { integer, jsonb, pgEnum, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { PROPERTY_STATUSES, PROPERTY_TYPES } from '../shared';
 
 export const propertyStatus = pgEnum('property_status', PROPERTY_STATUSES);
@@ -9,6 +9,7 @@ export const userRole = pgEnum('user_role', ['investor', 'operator']);
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   publicKey: text('public_key').notNull().unique(),
+  email: text('email'),
   role: userRole('role').notNull().default('investor'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -117,3 +118,72 @@ export const transactions = pgTable('transactions', {
 
 export type TransactionRow = typeof transactions.$inferSelect;
 export type NewTransactionRow = typeof transactions.$inferInsert;
+
+export const NOTIFICATION_STATUSES = ['pending', 'sent', 'failed'] as const;
+export type NotificationStatus = (typeof NOTIFICATION_STATUSES)[number];
+
+export const notificationStatus = pgEnum('notification_status', NOTIFICATION_STATUSES);
+
+export const notifications = pgTable('notifications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  type: text('type').notNull(),
+  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+  status: notificationStatus('status').notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+  sentAt: timestamp('sent_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type NotificationRow = typeof notifications.$inferSelect;
+export type NewNotificationRow = typeof notifications.$inferInsert;
+
+export const contractEvents = pgTable('contract_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  propertyId: uuid('property_id')
+    .notNull()
+    .references(() => properties.id, { onDelete: 'cascade' }),
+  contractId: text('contract_id').notNull(),
+  eventId: text('event_id').notNull().unique(),
+  ledger: integer('ledger').notNull(),
+  type: text('type').notNull(),
+  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ContractEventRow = typeof contractEvents.$inferSelect;
+export type NewContractEventRow = typeof contractEvents.$inferInsert;
+
+export const holderBalances = pgTable(
+  'holder_balances',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    propertyId: uuid('property_id')
+      .notNull()
+      .references(() => properties.id, { onDelete: 'cascade' }),
+    holder: text('holder').notNull(),
+    balance: text('balance').notNull().default('0'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('holder_balances_property_holder_idx').on(table.propertyId, table.holder)],
+);
+
+export type HolderBalanceRow = typeof holderBalances.$inferSelect;
+export type NewHolderBalanceRow = typeof holderBalances.$inferInsert;
+
+export const indexerCursors = pgTable('indexer_cursors', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  contractId: text('contract_id').notNull().unique(),
+  lastLedger: integer('last_ledger').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type IndexerCursorRow = typeof indexerCursors.$inferSelect;
+export type NewIndexerCursorRow = typeof indexerCursors.$inferInsert;

@@ -6,19 +6,35 @@ import {
   DrizzlePropertyRepository,
   InMemoryPropertyRepository,
 } from './repositories/PropertyRepository';
+import { CachedPropertyRepository } from './repositories/CachedPropertyRepository';
+import { CacheService } from './services/CacheService';
+import { DrizzleHolderBalanceRepository } from './repositories/HolderBalanceRepository';
+import { startEventIndexer } from './workers/eventIndexer';
+import { startNotificationWorker } from './workers/notificationWorker';
 
 const env = loadEnv();
 
-const properties = env.DATABASE_URL
-  ? new DrizzlePropertyRepository(createDatabase(env.DATABASE_URL))
-  : new InMemoryPropertyRepository();
+const db = env.DATABASE_URL ? createDatabase(env.DATABASE_URL) : undefined;
+
+let properties = db ? new DrizzlePropertyRepository(db) : new InMemoryPropertyRepository();
 
 if (!env.DATABASE_URL) {
   console.warn('DATABASE_URL is not set: using the in-memory repository, data will not persist');
 }
 
+let cache: CacheService | undefined;
+if (env.REDIS_URL) {
+  cache = new CacheService(env.REDIS_URL);
+  properties = new CachedPropertyRepository(properties, cache);
+} else {
+  console.warn('REDIS_URL is not set: property reads will not be cached');
+}
+
+const holderBalances = db ? new DrizzleHolderBalanceRepository(db) : undefined;
+
 createApp({
   properties,
+  holderBalances,
   corsOrigins: env.CORS_ALLOWED_ORIGINS.split(',').map((o) => o.trim()),
 })
   .use(
@@ -38,5 +54,17 @@ createApp({
     }),
   )
   .listen(env.PORT);
+
+if (db && env.SOROBAN_RPC_URL) {
+  startEventIndexer({ db, rpcUrl: env.SOROBAN_RPC_URL });
+} else {
+  console.warn('SOROBAN_RPC_URL or DATABASE_URL is not set: event indexer will not run');
+}
+
+if (db && env.EMAIL_PROVIDER_KEY) {
+  startNotificationWorker({ db, providerKey: env.EMAIL_PROVIDER_KEY });
+} else {
+  console.warn('EMAIL_PROVIDER_KEY or DATABASE_URL is not set: notification worker will not run');
+}
 
 console.info(`defi-estate API listening on http://localhost:${env.PORT} (docs at /docs)`);

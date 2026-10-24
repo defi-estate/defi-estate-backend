@@ -2,6 +2,7 @@ import { Address, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import type { StellarService } from './StellarService';
 import type { DistributionRepository } from '../db/repositories/DistributionRepository';
 import type { BalanceRepository } from '../db/repositories/BalanceRepository';
+import type { NotificationService } from './NotificationService';
 
 export const MAX_BATCH_SIZE = 100;
 
@@ -38,6 +39,7 @@ export interface DistributionServiceDeps {
   distributionRepository: DistributionRepository;
   balanceRepository: BalanceRepository;
   yieldDistributorContractId: string;
+  notificationService?: NotificationService;
 }
 
 /**
@@ -129,12 +131,14 @@ export class DistributionService {
   private readonly distributionRepository: DistributionRepository;
   private readonly balanceRepository: BalanceRepository;
   private readonly yieldDistributorContractId: string;
+  private readonly notificationService?: NotificationService;
 
   constructor(deps: DistributionServiceDeps) {
     this.stellarService = deps.stellarService;
     this.distributionRepository = deps.distributionRepository;
     this.balanceRepository = deps.balanceRepository;
     this.yieldDistributorContractId = deps.yieldDistributorContractId;
+    this.notificationService = deps.notificationService;
   }
 
   /**
@@ -183,6 +187,16 @@ export class DistributionService {
     };
 
     const saved = await this.distributionRepository.save(record);
+
+    if (this.notificationService) {
+      await this.notificationService.enqueueYieldReadyNotifications({
+        distributionId: saved.id,
+        propertyId,
+        period,
+        allocations,
+      });
+    }
+
     return saved;
   }
 }

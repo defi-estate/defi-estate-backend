@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { Keypair } from '@stellar/stellar-sdk';
+import { Elysia } from 'elysia';
+import { openapi } from '@elysiajs/swagger';
 import type { KycSubmission, Paginated, Property } from '../src/shared';
 import { createApp } from '../src/app';
 import { InMemoryPropertyRepository } from '../src/repositories/PropertyRepository';
@@ -7,6 +9,10 @@ import { InMemoryAuthRepository } from '../src/repositories/AuthRepository';
 import type { StellarService } from '../src/services/StellarService';
 import type { DistributionService } from '../src/services/DistributionService';
 import { InMemoryKycRepository } from '../src/repositories/KycRepository';
+import { InMemoryHolderRepository } from '../src/repositories/HolderRepository';
+import { healthRoutes } from '../src/routes/health';
+import { propertyRoutes } from '../src/routes/properties';
+import recordedEvents from './fixtures/soroban-events.json';
 import { InMemoryAuditService } from '../src/services/AuditService';
 
 const payload = {
@@ -722,6 +728,131 @@ describe('distributions route', () => {
   });
 });
 
+type OpenApiDoc = {
+  paths: Record<
+    string,
+    Record<string, { responses?: Record<string, { content?: Record<string, unknown> }> }>
+  >;
+};
+
+function buildDocumentedApp() {
+  return new Elysia()
+    .use(openapi({ path: '/docs', documentation: { info: { title: 'test', version: '0' } } }))
+    .use(healthRoutes())
+    .use(propertyRoutes({ properties: new InMemoryPropertyRepository() }));
+}
+
+async function fetchOpenApi(): Promise<OpenApiDoc> {
+  const app = buildDocumentedApp();
+  const res = await app.handle(new Request('http://localhost/docs/json'));
+  expect(res.status).toBe(200);
+  return (await res.json()) as OpenApiDoc;
+}
+
+function expectResponses(doc: OpenApiDoc, path: string, method: string, codes: string[]) {
+  const operation = doc.paths[path]?.[method];
+  expect(operation).toBeDefined();
+  for (const code of codes) {
+    const response = operation?.responses?.[code];
+    expect(response, `${method.toUpperCase()} ${path} is missing a ${code} response`).toBeDefined();
+    expect(
+      Object.keys(response?.content ?? {}).length,
+      `${method.toUpperCase()} ${path} ${code} has no content schema`,
+    ).toBeGreaterThan(0);
+  }
+}
+
+describe('OpenAPI response schemas', () => {
+  it('declares typed responses for /health', async () => {
+    const doc = await fetchOpenApi();
+    expectResponses(doc, '/health', 'get', ['200', '400', '404']);
+  });
+
+  it('declares typed responses for every /properties route', async () => {
+    const doc = await fetchOpenApi();
+    expectResponses(doc, '/properties', 'get', ['200', '400', '404']);
+    expectResponses(doc, '/properties', 'post', ['201', '400', '404']);
+    expectResponses(doc, '/properties/{id}', 'get', ['200', '400', '404']);
+    expectResponses(doc, '/properties/{id}', 'patch', ['200', '400', '404', '409']);
+  });
+
+  it('fails validation when a route returns a body that does not match its schema', async () => {
+    const app = new Elysia()
+      .use(openapi({ path: '/docs', documentation: { info: { title: 'test', version: '0' } } }))
+      .get(
+        '/broken',
+        () => ({ status: 'ok', data: { unexpected: true } }),
+        {
+          response: {
+            200: {
+              type: 'object',
+              required: ['status', 'data'],
+              properties: {
+                status: { type: 'string', const: 'ok' },
+                data: { type: 'object', required: ['value'], properties: { value: { type: 'string' } } },
+              },
+            },
+          },
+        },
+      );
+
+    const res = await app.handle(new Request('http://localhost/broken'));
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+});
+
+describe('holders route', () => {
+  let app: ReturnType<typeof createApp>;
+  let holders: InMemoryHolderRepository;
+  let propertyId: string;
+
+  beforeEach(async () => {
+    holders = new InMemoryHolderRepository();
+    app = createApp({
+      properties: new InMemoryPropertyRepository(),
+      holders,
+      corsOrigins: ['*'],
+    });
+    const created = await read(await app.handle(json('POST', '/properties', payload)));
+    propertyId = created.data.id;
+    holders.seedFromEvents(propertyId, recordedEvents.events);
+  });
+
+  it('returns holder balances for an operator', async () => {
+    const res = await app.handle(
+      new Request(`http://localhost/properties/${propertyId}/holders`, {
+        headers: { 'x-user-role': 'operator' },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { items: { address: string; balance: string }[]; total: number };
+    };
+    expect(body.data.total).toBe(2);
+    const byAddress = Object.fromEntries(body.data.items.map((h) => [h.address, h.balance]));
+    expect(byAddress.GALICE).toBe('150');
+    expect(byAddress.GBOB).toBe('50');
+  });
+
+  it('forbids non-operators from reading holders', async () => {
+    const res = await app.handle(
+      new Request(`http://localhost/properties/${propertyId}/holders`, {
+        headers: { 'x-user-role': 'investor' },
+      }),
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('returns 404 for an unknown property', async () => {
+    const res = await app.handle(
+      new Request(`http://localhost/properties/${crypto.randomUUID()}/holders`, {
+        headers: { 'x-user-role': 'operator' },
+      }),
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
 type KycEnvelope = {
   status?: string;
   data: KycSubmission & Paginated<KycSubmission>;
@@ -817,22 +948,4 @@ describe('kyc API', () => {
     const list = await app.handle(kycRequest('GET', '/kyc?status=pending', 'investor'));
     expect(list.status).toBe(403);
 
-    const review = await app.handle(
-      kycRequest('POST', `/kyc/${created.id}/review`, 'investor', { status: 'approved' }),
-    );
-    expect(review.status).toBe(403);
-
-    const submit = await app.handle(kycRequest('POST', '/kyc', 'operator', {}));
-    expect(submit.status).toBe(403);
-  });
-
-  it('returns 404 when reviewing an unknown submission', async () => {
-    const res = await app.handle(
-      kycRequest('POST', `/kyc/${crypto.randomUUID()}/review`, 'operator', {
-        status: 'approved',
-      }),
-    );
-    expect(res.status).toBe(404);
-    expect((await readKyc(res)).error.code).toBe('KYC_NOT_FOUND');
-  });
-});
+    const review = await app
