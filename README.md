@@ -16,6 +16,7 @@ bun install
 bun run db:up          # Postgres + Redis
 cp .env.example .env
 bun run db:push        # create tables from src/db/schema.ts
+bun run db:seed        # load demo properties (safe to run twice)
 bun run dev            # http://localhost:3001, Swagger at /docs
 ```
 
@@ -30,6 +31,7 @@ Without `DATABASE_URL` the API uses an in-memory repository, which is enough for
 | GET    | `/properties/:id`             | one property                               |
 | POST   | `/properties`                 | create a draft property                    |
 | PATCH  | `/properties/:id`             | update fields, status or token contract ID |
+| POST   | `/properties/:id/images`      | upload property images (multipart, max 5 MB) |
 
 Responses use the `ApiResponse<T>` envelope from `src/shared/types/api.ts`.
 

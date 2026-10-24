@@ -6,17 +6,27 @@ import {
   type CreatePropertyInput,
   type Paginated,
   type Property,
+  type PropertyImage,
   type PropertyQueryInput,
   type UpdatePropertyInput,
 } from '../shared';
 import type { Database } from '../db';
-import { properties, type PropertyRow } from '../db/schema';
+import { properties, propertyImages, type PropertyRow } from '../db/schema';
+
+export interface AddPropertyImageInput {
+  storageKey: string;
+  url: string;
+  contentType: string;
+  sizeBytes: number;
+}
 
 export interface PropertyRepository {
   list(query: PropertyQueryInput): Promise<Paginated<Property>>;
   get(id: string): Promise<Property | null>;
   create(input: CreatePropertyInput): Promise<Property>;
   update(id: string, input: UpdatePropertyInput): Promise<Property | null>;
+  addImage(propertyId: string, input: AddPropertyImageInput): Promise<PropertyImage>;
+  listImages(propertyId: string): Promise<PropertyImage[]>;
 }
 
 function assertValidTransition(
@@ -67,6 +77,13 @@ function toProperty(row: PropertyRow): Property {
     ...row,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function toPropertyImage(row: typeof propertyImages.$inferSelect): PropertyImage {
+  return {
+    ...row,
+    createdAt: row.createdAt.toISOString(),
   };
 }
 
@@ -133,11 +150,29 @@ export class DrizzlePropertyRepository implements PropertyRepository {
       .returning();
     return row ? toProperty(row) : null;
   }
+
+  async addImage(propertyId: string, input: AddPropertyImageInput): Promise<PropertyImage> {
+    const [row] = await this.db
+      .insert(propertyImages)
+      .values({ ...input, propertyId })
+      .returning();
+    return toPropertyImage(row!);
+  }
+
+  async listImages(propertyId: string): Promise<PropertyImage[]> {
+    const rows = await this.db
+      .select()
+      .from(propertyImages)
+      .where(eq(propertyImages.propertyId, propertyId))
+      .orderBy(asc(propertyImages.createdAt));
+    return rows.map(toPropertyImage);
+  }
 }
 
 /** Used in tests and when DATABASE_URL is unset during local UI work. */
 export class InMemoryPropertyRepository implements PropertyRepository {
   private readonly items = new Map<string, Property>();
+  private readonly images = new Map<string, PropertyImage[]>();
 
   async list(query: PropertyQueryInput): Promise<Paginated<Property>> {
     const { page, pageSize, sort } = query;
@@ -179,5 +214,21 @@ export class InMemoryPropertyRepository implements PropertyRepository {
     };
     this.items.set(id, next);
     return next;
+  }
+
+  async addImage(propertyId: string, input: AddPropertyImageInput): Promise<PropertyImage> {
+    const image: PropertyImage = {
+      ...input,
+      id: crypto.randomUUID(),
+      propertyId,
+      createdAt: new Date().toISOString(),
+    };
+    const existing = this.images.get(propertyId) ?? [];
+    this.images.set(propertyId, [...existing, image]);
+    return image;
+  }
+
+  async listImages(propertyId: string): Promise<PropertyImage[]> {
+    return this.images.get(propertyId) ?? [];
   }
 }

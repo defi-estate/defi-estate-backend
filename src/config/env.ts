@@ -13,6 +13,13 @@ const envSchema = z.object({
   STELLAR_ADMIN_SECRET: z.string().min(1).optional(),
   STELLAR_RPC_URL: z.string().url().optional(),
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(120),
+  // S3-compatible storage for property image uploads. All optional so the API
+  // still boots without storage configured; uploads fail at request time.
+  S3_BUCKET: z.string().min(1).optional(),
+  S3_ENDPOINT: z.string().url().optional(),
+  S3_REGION: z.string().min(1).optional(),
+  S3_ACCESS_KEY_ID: z.string().min(1).optional(),
+  S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
 });
 
 export type ApiEnv = z.infer<typeof envSchema>;
@@ -52,3 +59,14 @@ JWT_SECRET=change-me-to-a-long-random-secret-value
 # Operator seed
 # Stellar public key of the first operator account created by the seed script.
 OPERATOR_PUBLIC_KEY=GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+
+# S3-compatible storage (required for property image uploads)
+# Bucket where uploaded property images are stored.
+S3_BUCKET=stellar-estate-images
+# Endpoint of the S3-compatible service (e.g. MinIO, R2, AWS S3).
+S3_ENDPOINT=http://localhost:9000
+# Region for the storage service (use "auto" for Cloudflare R2).
+S3_REGION=us-east-1
+# Credentials used to sign upload requests.
+S3_ACCESS_KEY_ID=change-me
+S3_SECRET_ACCESS_KEY=change-me

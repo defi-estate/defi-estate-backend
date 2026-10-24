@@ -7,6 +7,8 @@ import { InMemoryAuthRepository } from '../src/repositories/AuthRepository';
 import type { StellarService } from '../src/services/StellarService';
 import type { DistributionService } from '../src/services/DistributionService';
 import { InMemoryKycRepository } from '../src/repositories/KycRepository';
+import type { StorageService } from '../src/services/StorageService';
+import type { IdempotencyStore } from '../src/middleware/idempotency';
 
 const payload = {
   name: 'Lekki Garden Apartments',
@@ -340,6 +342,184 @@ describe('properties API', () => {
     const res = await app.handle(json('GET', `/properties/${crypto.randomUUID()}`));
     expect(res.status).toBe(404);
     expect((await read(res)).error.code).toBe('PROPERTY_NOT_FOUND');
+  });
+});
+
+function fakeStorage() {
+  const uploads: { key: string; body: Uint8Array; contentType: string }[] = [];
+  const service = {
+    upload: async (key: string, body: Uint8Array, contentType: string) => {
+      uploads.push({ key, body, contentType });
+      return { key, url: `https://cdn.example.com/${key}` };
+    },
+  } as unknown as StorageService;
+  return { service, uploads };
+}
+
+function fakeIdempotencyStore() {
+  const records = new Map<
+    string,
+    { route: string; requestHash: string; status: number; body: unknown; expiresAt: number }
+  >();
+  const store = {
+    get: async (key: string) => records.get(key) ?? null,
+    save: async (
+      key: string,
+      record: { route: string; requestHash: string; status: number; body: unknown; expiresAt: number },
+    ) => {
+      records.set(key, record);
+    },
+  } as unknown as IdempotencyStore;
+  return { store, records };
+}
+
+// 1x1 transparent PNG
+const PNG_BYTES = Uint8Array.from(
+  Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+    'base64',
+  ),
+);
+
+function multipart(field: string, filename: string, bytes: Uint8Array, token?: string) {
+  const form = new FormData();
+  form.append(field, new Blob([bytes]), filename);
+  const headers: Record<string, string> = {};
+  if (token) headers.authorization = `Bearer ${token}`;
+  return new Request('http://localhost/properties/placeholder/images', {
+    method: 'POST',
+    headers,
+    body: form,
+  });
+}
+
+describe('property image uploads', () => {
+  let app: ReturnType<typeof createApp>;
+  let storage: ReturnType<typeof fakeStorage>;
+  let operator: Keypair;
+  let operatorToken: string;
+  let propertyId: string;
+
+  beforeEach(async () => {
+    operator = Keypair.random();
+    const auth = new InMemoryAuthRepository();
+    auth.seedUser({ publicKey: operator.publicKey(), role: 'operator' });
+    storage = fakeStorage();
+    app = createApp({
+      properties: new InMemoryPropertyRepository(),
+      auth,
+      corsOrigins: ['*'],
+      jwtSecret: 'test-secret',
+      storage: storage.service,
+    });
+    operatorToken = await signIn(app, operator);
+    const created = (
+      await read(await app.handle(json('POST', '/properties', payload, operatorToken)))
+    ).data;
+    propertyId = created.id;
+  });
+
+  function upload(filename: string, bytes: Uint8Array, token = operatorToken) {
+    const form = new FormData();
+    form.append('file', new Blob([bytes]), filename);
+    return new Request(`http://localhost/properties/${propertyId}/images`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: form,
+    });
+  }
+
+  it('uploads a real PNG and returns the stored image', async () => {
+    const res = await app.handle(upload('photo.png', PNG_BYTES));
+    expect(res.status).toBe(201);
+    const { data } = await read(res);
+    expect(storage.uploads).toHaveLength(1);
+    expect(storage.uploads[0]?.contentType).toBe('image/png');
+    expect(JSON.stringify(data)).toContain('https://cdn.example.com/');
+  });
+
+  it('rejects a renamed non-image file', async () => {
+    const res = await app.handle(upload('fake.png', Buffer.from('not an image at all')));
+    expect(res.status).toBe(400);
+    expect((await read(res)).error.code).toBe('VALIDATION_ERROR');
+    expect(storage.uploads).toHaveLength(0);
+  });
+
+  it('rejects an oversized upload', async () => {
+    const oversized = new Uint8Array(5 * 1024 * 1024 + 1);
+    oversized.set(PNG_BYTES);
+    const res = await app.handle(upload('huge.png', oversized));
+    expect(res.status).toBe(400);
+    expect((await read(res)).error.code).toBe('VALIDATION_ERROR');
+    expect(storage.uploads).toHaveLength(0);
+  });
+
+  it('rejects anonymous uploads', async () => {
+    const form = new FormData();
+    form.append('file', new Blob([PNG_BYTES]), 'photo.png');
+    const res = await app.handle(
+      new Request(`http://localhost/properties/${propertyId}/images`, {
+        method: 'POST',
+        body: form,
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('idempotency', () => {
+  let app: ReturnType<typeof createApp>;
+  let idempotency: ReturnType<typeof fakeIdempotencyStore>;
+  let operator: Keypair;
+  let operatorToken: string;
+
+  beforeEach(async () => {
+    operator = Keypair.random();
+    const auth = new InMemoryAuthRepository();
+    auth.seedUser({ publicKey: operator.publicKey(), role: 'operator' });
+    idempotency = fakeIdempotencyStore();
+    app = createApp({
+      properties: new InMemoryPropertyRepository(),
+      auth,
+      corsOrigins: ['*'],
+      jwtSecret: 'test-secret',
+      idempotency: idempotency.store,
+    });
+    operatorToken = await signIn(app, operator);
+  });
+
+  function post(key: string, body: unknown) {
+    return new Request('http://localhost/properties', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${operatorToken}`,
+        'idempotency-key': key,
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('stores the response of the first request', async () => {
+    const res = await app.handle(post('key-1', payload));
+    expect(res.status).toBe(201);
+    expect(idempotency.records.size).toBe(1);
+  });
+
+  it('replays the stored response for an exact retry', async () => {
+    const first = await app.handle(post('key-2', payload));
+    const firstBody = await read(first);
+    const retry = await app.handle(post('key-2', payload));
+    expect(retry.status).toBe(201);
+    const retryBody = await read(retry);
+    expect(retryBody.data.id).toBe(firstBody.data.id);
+  });
+
+  it('returns 422 when the key is reused with a different body', async () => {
+    await app.handle(post('key-3', payload));
+    const res = await app.handle(post('key-3', { ...payload, name: 'Different Name' }));
+    expect(res.status).toBe(422);
+    expect((await read(res)).error.code).toBe('IDEMPOTENCY_KEY_REUSED');
   });
 });
 

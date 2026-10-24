@@ -26,6 +26,16 @@ export function isAllowedTransition(from: PropertyStatus, to: PropertyStatus): b
   return allowedTransitions[from].includes(to);
 }
 
+export interface PropertyImage {
+  id: string;
+  propertyId: string;
+  url: string;
+  storageKey: string;
+  contentType: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
 export interface Property {
   id: string;
   name: string;
@@ -48,6 +58,8 @@ export interface Property {
   /** Soroban contract ID of the property share token, once deployed. */
   tokenContractId: string | null;
   imageUrl: string | null;
+  /** Uploaded images stored in S3-compatible storage. */
+  images?: PropertyImage[];
   createdAt: string;
   updatedAt: string;
 }
