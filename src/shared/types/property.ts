@@ -4,6 +4,28 @@ export type PropertyStatus = (typeof PROPERTY_STATUSES)[number];
 export const PROPERTY_TYPES = ['residential', 'commercial', 'mixed_use', 'land'] as const;
 export type PropertyType = (typeof PROPERTY_TYPES)[number];
 
+/**
+ * Allowed property lifecycle transitions.
+ *
+ * - draft -> pending_review
+ * - pending_review -> draft | tokenized
+ * - tokenized -> archived
+ * - archived -> (terminal)
+ */
+export const allowedTransitions: Record<PropertyStatus, readonly PropertyStatus[]> = {
+  draft: ['pending_review'],
+  pending_review: ['draft', 'tokenized'],
+  tokenized: ['archived'],
+  archived: [],
+};
+
+/**
+ * Returns true when moving from `from` to `to` is a permitted lifecycle transition.
+ */
+export function isAllowedTransition(from: PropertyStatus, to: PropertyStatus): boolean {
+  return allowedTransitions[from].includes(to);
+}
+
 export interface Property {
   id: string;
   name: string;

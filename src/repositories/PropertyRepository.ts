@@ -1,20 +1,65 @@
-import { count, desc, eq } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, type SQL } from 'drizzle-orm';
 import {
+  allowedTransitions,
   computeSharePriceUsdCents,
+  HttpError,
   type CreatePropertyInput,
   type Paginated,
-  type PaginationInput,
   type Property,
+  type PropertyQueryInput,
   type UpdatePropertyInput,
 } from '../shared';
 import type { Database } from '../db';
 import { properties, type PropertyRow } from '../db/schema';
 
 export interface PropertyRepository {
-  list(page: PaginationInput): Promise<Paginated<Property>>;
+  list(query: PropertyQueryInput): Promise<Paginated<Property>>;
   get(id: string): Promise<Property | null>;
   create(input: CreatePropertyInput): Promise<Property>;
   update(id: string, input: UpdatePropertyInput): Promise<Property | null>;
+}
+
+function assertValidTransition(
+  current: Pick<Property, 'status' | 'tokenContractId'>,
+  input: UpdatePropertyInput,
+): void {
+  if (input.status === undefined || input.status === current.status) return;
+  const allowed = allowedTransitions[current.status] ?? [];
+  if (!allowed.includes(input.status)) {
+    throw new HttpError(
+      409,
+      'INVALID_STATUS_TRANSITION',
+      `Cannot transition status from '${current.status}' to '${input.status}'`,
+    );
+  }
+  if (input.status === 'tokenized') {
+    const tokenContractId = input.tokenContractId ?? current.tokenContractId;
+    if (!tokenContractId) {
+      throw new HttpError(
+        409,
+        'INVALID_STATUS_TRANSITION',
+        "A tokenContractId is required to transition status to 'tokenized'",
+      );
+    }
+  }
+}
+
+function compareBySort(
+  sort: PropertyQueryInput['sort'],
+): (a: Property, b: Property) => number {
+  if (sort === 'yield_desc') {
+    return (a, b) => b.expectedYieldBps - a.expectedYieldBps;
+  }
+  return (a, b) => b.createdAt.localeCompare(a.createdAt);
+}
+
+function matchesQuery(property: Property, query: PropertyQueryInput): boolean {
+  if (query.city && property.city !== query.city) return false;
+  if (query.country && property.country !== query.country) return false;
+  if (query.type && property.type !== query.type) return false;
+  if (query.status && property.status !== query.status) return false;
+  if (query.minYield !== undefined && property.expectedYieldBps < query.minYield) return false;
+  return true;
 }
 
 function toProperty(row: PropertyRow): Property {
@@ -38,15 +83,30 @@ function withSharePrice<T extends Partial<CreatePropertyInput>>(
 export class DrizzlePropertyRepository implements PropertyRepository {
   constructor(private readonly db: Database) {}
 
-  async list({ page, pageSize }: PaginationInput): Promise<Paginated<Property>> {
+  async list(query: PropertyQueryInput): Promise<Paginated<Property>> {
+    const { page, pageSize, sort } = query;
+    const conditions: SQL[] = [];
+    if (query.city) conditions.push(eq(properties.city, query.city));
+    if (query.country) conditions.push(eq(properties.country, query.country));
+    if (query.type) conditions.push(eq(properties.type, query.type));
+    if (query.status) conditions.push(eq(properties.status, query.status));
+    if (query.minYield !== undefined) {
+      conditions.push(gte(properties.expectedYieldBps, query.minYield));
+    }
+    const where = conditions.length ? and(...conditions) : undefined;
+    const orderBy =
+      sort === 'yield_desc'
+        ? [desc(properties.expectedYieldBps), desc(properties.createdAt)]
+        : [desc(properties.createdAt)];
     const [rows, totals] = await Promise.all([
       this.db
         .select()
         .from(properties)
-        .orderBy(desc(properties.createdAt))
+        .where(where)
+        .orderBy(...orderBy)
         .limit(pageSize)
         .offset((page - 1) * pageSize),
-      this.db.select({ total: count() }).from(properties),
+      this.db.select({ total: count() }).from(properties).where(where),
     ]);
     return { items: rows.map(toProperty), page, pageSize, total: totals[0]?.total ?? 0 };
   }
@@ -65,6 +125,7 @@ export class DrizzlePropertyRepository implements PropertyRepository {
   async update(id: string, input: UpdatePropertyInput): Promise<Property | null> {
     const current = await this.get(id);
     if (!current) return null;
+    assertValidTransition(current, input);
     const [row] = await this.db
       .update(properties)
       .set({ ...withSharePrice(input, current), updatedAt: new Date() })
@@ -78,8 +139,11 @@ export class DrizzlePropertyRepository implements PropertyRepository {
 export class InMemoryPropertyRepository implements PropertyRepository {
   private readonly items = new Map<string, Property>();
 
-  async list({ page, pageSize }: PaginationInput): Promise<Paginated<Property>> {
-    const all = [...this.items.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  async list(query: PropertyQueryInput): Promise<Paginated<Property>> {
+    const { page, pageSize, sort } = query;
+    const all = [...this.items.values()]
+      .filter((property) => matchesQuery(property, query))
+      .sort(compareBySort(sort));
     const start = (page - 1) * pageSize;
     return { items: all.slice(start, start + pageSize), page, pageSize, total: all.length };
   }
@@ -106,6 +170,7 @@ export class InMemoryPropertyRepository implements PropertyRepository {
   async update(id: string, input: UpdatePropertyInput): Promise<Property | null> {
     const current = this.items.get(id);
     if (!current) return null;
+    assertValidTransition(current, input);
     const next: Property = {
       ...current,
       ...withSharePrice(input, current),

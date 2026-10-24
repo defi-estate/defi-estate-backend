@@ -4,6 +4,16 @@ import { PROPERTY_STATUSES, PROPERTY_TYPES } from '../shared';
 export const propertyStatus = pgEnum('property_status', PROPERTY_STATUSES);
 export const propertyType = pgEnum('property_type', PROPERTY_TYPES);
 
+export const userRole = pgEnum('user_role', ['investor', 'operator']);
+
+export const users = pgTable('users', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  publicKey: text('public_key').notNull().unique(),
+  role: userRole('role').notNull().default('investor'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const KYC_STATUSES = ['pending', 'approved', 'rejected'] as const;
 export type KycStatus = (typeof KYC_STATUSES)[number];
 
@@ -48,6 +58,7 @@ export const auditLogs = pgTable('audit_logs', {
 });
 
 export type PropertyRow = typeof properties.$inferSelect;
+export type UserRow = typeof users.$inferSelect;
 export type KycSubmissionRow = typeof kycSubmissions.$inferSelect;
 export type AuditLogRow = typeof auditLogs.$inferSelect;
 
