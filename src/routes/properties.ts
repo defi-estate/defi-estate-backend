@@ -15,6 +15,7 @@ import type { PropertyRepository } from '../repositories/PropertyRepository';
 import type { KycRepository } from '../repositories/KycRepository';
 import type { TransactionRepository } from '../repositories/TransactionRepository';
 import type { StellarService } from '../services/StellarService';
+import type { AuditService } from '../services/AuditService';
 
 const ok = <T>(data: T): ApiSuccess<T> => ({ success: true, data });
 
@@ -52,9 +53,10 @@ export interface PropertyRouteDeps {
   kycRepo: KycRepository;
   txRepo: TransactionRepository;
   stellar: StellarService;
+  audit?: AuditService;
 }
 
-export function propertyRoutes({ repo, kycRepo, txRepo, stellar }: PropertyRouteDeps) {
+export function propertyRoutes({ repo, kycRepo, txRepo, stellar, audit }: PropertyRouteDeps) {
   return new Elysia({ prefix: '/properties', detail: { tags: ['Properties'] } })
     .use(authPlugin)
     .get(
@@ -100,7 +102,7 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar }: PropertyRoute
     )
     .patch(
       '/:id',
-      async ({ params, body }) => {
+      async ({ params, body, auth }) => {
         const input = updatePropertySchema.parse(body);
         const existing = await repo.get(params.id);
         if (!existing) throw new HttpError(404, 'PROPERTY_NOT_FOUND', 'Property not found');
@@ -113,6 +115,14 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar }: PropertyRoute
         }
         const property = await repo.update(params.id, input);
         if (!property) throw new HttpError(404, 'PROPERTY_NOT_FOUND', 'Property not found');
+        await audit?.log({
+          actor: auth.user.publicKey,
+          action: 'property.update',
+          entityType: 'property',
+          entityId: property.id,
+          before: existing,
+          after: property,
+        });
         return ok(property);
       },
       {
@@ -122,7 +132,7 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar }: PropertyRoute
     )
     .post(
       '/:id/whitelist',
-      async ({ params, body, set }) => {
+      async ({ params, body, set, auth }) => {
         const property = await repo.get(params.id);
         if (!property) throw new HttpError(404, 'PROPERTY_NOT_FOUND', 'Property not found');
         if (!property.tokenContractId) {
@@ -148,6 +158,14 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar }: PropertyRoute
           result: result.result,
         });
 
+        await audit?.log({
+          actor: auth.user.publicKey,
+          action: 'property.whitelist',
+          entityType: 'property',
+          entityId: property.id,
+          after: record,
+        });
+
         set.status = 201;
         return ok(record);
       },
@@ -159,7 +177,7 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar }: PropertyRoute
     )
     .post(
       '/:id/mint',
-      async ({ params, body, set }) => {
+      async ({ params, body, set, auth }) => {
         const property = await repo.get(params.id);
         if (!property) throw new HttpError(404, 'PROPERTY_NOT_FOUND', 'Property not found');
         if (!property.tokenContractId) {
@@ -184,6 +202,14 @@ export function propertyRoutes({ repo, kycRepo, txRepo, stellar }: PropertyRoute
           txHash: result.txHash,
           status: result.status,
           result: result.result,
+        });
+
+        await audit?.log({
+          actor: auth.user.publicKey,
+          action: 'property.mint',
+          entityType: 'property',
+          entityId: property.id,
+          after: record,
         });
 
         set.status = 201;

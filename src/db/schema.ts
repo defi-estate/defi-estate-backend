@@ -57,10 +57,23 @@ export const auditLogs = pgTable('audit_logs', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const auditLog = pgTable('audit_log', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  actor: text('actor').notNull(),
+  action: text('action').notNull(),
+  entityType: text('entity_type').notNull(),
+  entityId: uuid('entity_id').notNull(),
+  before: jsonb('before').$type<Record<string, unknown> | null>(),
+  after: jsonb('after').$type<Record<string, unknown> | null>(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export type PropertyRow = typeof properties.$inferSelect;
 export type UserRow = typeof users.$inferSelect;
 export type KycSubmissionRow = typeof kycSubmissions.$inferSelect;
 export type AuditLogRow = typeof auditLogs.$inferSelect;
+export type AuditEntryRow = typeof auditLog.$inferSelect;
+export type NewAuditEntryRow = typeof auditLog.$inferInsert;
 
 export const DISTRIBUTION_STATUSES = ['pending', 'submitted', 'completed', 'failed'] as const;
 export type DistributionStatus = (typeof DISTRIBUTION_STATUSES)[number];
